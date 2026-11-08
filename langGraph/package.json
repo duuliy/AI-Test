@@ -1,0 +1,33 @@
+{
+  "name": "longgraph",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "day1": "tsx src/day1/graph.ts",
+    "day4": "tsx src/day4/memory.ts",
+    "day4:sqlite": "tsx src/day4/sqlite.ts",
+    "day4:time-travel": "tsx src/day4/time-travel.ts",
+    "day2": "tsx src/day2/reducers.ts",
+    "day2:update": "tsx src/day2/update-state.ts",
+    "day3": "tsx src/day3/run.ts",
+    "day5": "tsx src/day5/approval.ts",
+    "day5:stream": "tsx src/day5/stream.ts",
+    "day6": "tsx src/day6/subgraph.ts",
+    "day6:send": "tsx src/day6/send.ts",
+    "day6:supervisor": "tsx src/day6/supervisor.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3.0",
+    "@langchain/langgraph": "^0.2.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^0.1.5",
+    "@langchain/openai": "^0.4.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

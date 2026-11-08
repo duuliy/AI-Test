@@ -1,0 +1,39 @@
+{
+  "name": "langchain-js-day1",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "day1": "tsx src/day1/chat.ts",
+    "day1:server": "tsx src/day1/server.ts",
+    "day2": "tsx src/day2/structured.ts",
+    "day3": "tsx src/day3/run-tools.ts",
+    "day4": "tsx src/day4/agent.ts",
+    "day5": "tsx src/day5/memory.ts",
+    "day6": "tsx src/day6/rag.ts",
+    "day8": "tsx src/day8/middleware.ts",
+    "day7": "tsx src/day7/rag-agent.ts",
+    "day10": "tsx src/day10/trace.ts",
+    "day10:graph": "tsx src/day10/graph.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@langchain/classic": "^1.0.57",
+    "@langchain/core": "^1.2.20",
+    "@langchain/langgraph": "^1.5.2",
+    "@langchain/openai": "^1.5.8",
+    "@langchain/textsplitters": "^1.0.2",
+    "express": "^4.22.3",
+    "langchain": "^1.5.18",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^20.19.43",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

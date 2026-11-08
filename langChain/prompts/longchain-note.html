@@ -1,0 +1,992 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>LangChain.js 两周学习笔记</title>
+<style>
+  body{max-width:920px;margin:40px auto;padding:0 24px;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;font-size:16px;line-height:1.75;color:#1f2328;background:#fff}
+  h1{font-size:30px;border-bottom:2px solid #e5e7eb;padding-bottom:12px;margin-top:40px}
+  h2{font-size:24px;border-bottom:1px solid #e5e7eb;padding-bottom:8px;margin-top:36px}
+  h3{font-size:19px;margin-top:28px;color:#24292f}
+  p{margin:12px 0}
+  ul,ol{margin:10px 0 10px 28px}
+  li{margin:6px 0}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;background:#f3f4f6;padding:2px 5px;border-radius:4px}
+  pre{background:#f6f8fa;border:1px solid #e5e7eb;border-radius:6px;padding:14px 16px;overflow-x:auto}
+  pre code{background:none;padding:0;font-size:14px;line-height:1.55}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:15px}
+  th,td{border:1px solid #d0d7de;padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f3f4f6;font-weight:600}
+  blockquote{border-left:4px solid #d0d7de;margin:14px 0;padding:4px 14px;color:#57606a;background:#fafafa}
+  hr{border:none;border-top:1px solid #e5e7eb;margin:28px 0}
+  a{color:#0969da;text-decoration:none}
+</style>
+</head>
+<body>
+<h1>LangChain.js 两周学习笔记</h1>
+<blockquote>
+<p>对应项目代码在 <code>../src/day1</code>～<code>../src/day10</code>，综合项目在 <code>../src/final-project</code>。
+这份笔记偏“知识沉淀”，每天的执行步骤看对应的 dayN 提示词。</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>LangChain 的所有能力都围绕一条主线：</p>
+<pre><code class="language-text">消息数组 → 模型 → 工具调用 → 工具结果回填 → 模型 → 最终回答
+</code></pre>
+<ul>
+<li>模型是<strong>无状态</strong>的，上下文靠每次都发送完整 <code>messages</code></li>
+<li>Agent 本质是“模型 + 工具 + 循环”，<code>createAgent</code> 把这个循环封装好了</li>
+<li>记忆本质是把消息历史按 <code>thread_id</code> 存进 checkpointer</li>
+<li>RAG 本质是“先检索相关片段，再把片段塞进提示词”</li>
+<li>Middleware 本质是在模型调用、工具调用的生命周期上包一层逻辑</li>
+</ul>
+<hr>
+<h2>1. 核心心智模型</h2>
+<h3>1.1 模型无状态</h3>
+<p>模型不会自己记住上一轮。多轮对话的做法是：</p>
+<pre><code class="language-ts">await model.invoke([
+  new SystemMessage(&quot;你是助手&quot;),
+  new HumanMessage(&quot;第一轮&quot;),
+  new AIMessage(&quot;第一轮回答&quot;),
+  new HumanMessage(&quot;第二轮&quot;),
+])
+</code></pre>
+<p>所以：</p>
+<ul>
+<li>历史必须由调用方维护</li>
+<li>失败或中断的轮次不要写入历史</li>
+<li>流式输出时不要把 <code>AIMessageChunk</code> 直接塞进历史，要等完整回答拼好后再存</li>
+</ul>
+<h3>1.2 四种常用消息</h3>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SystemMessage</code></td>
+<td>系统规则、行为约束</td>
+</tr>
+<tr>
+<td><code>HumanMessage</code></td>
+<td>用户输入</td>
+</tr>
+<tr>
+<td><code>AIMessage</code></td>
+<td>模型输出，可能带 <code>tool_calls</code></td>
+</tr>
+<tr>
+<td><code>ToolMessage</code></td>
+<td>工具执行结果，必须带 <code>tool_call_id</code></td>
+</tr>
+</tbody></table>
+<h3>1.3 Chain 与 Agent</h3>
+<ul>
+<li>Chain：步骤固定，代码决定先做什么、再做什么</li>
+<li>Agent：模型自己决定是否调用工具、调用哪个工具、调用几次</li>
+</ul>
+<p><code>createAgent</code> 内部就是一个循环：</p>
+<pre><code class="language-text">调用模型
+  ↓ 有 tool_calls
+执行工具 → 生成 ToolMessage → 再调用模型
+  ↓ 没有 tool_calls
+返回最终 AIMessage
+</code></pre>
+<hr>
+<h2>2. 模型初始化</h2>
+<pre><code class="language-ts">import { initChatModel } from &quot;langchain&quot;;
+
+const model = await initChatModel(&quot;glm-4.6&quot;, {
+  modelProvider: &quot;openai&quot;,
+  apiKey: process.env.OPENAI_API_KEY,
+  configuration: {
+    baseURL: process.env.OPENAI_BASE_URL,
+  },
+  temperature: 0.2,
+});
+</code></pre>
+<p>要点：</p>
+<ul>
+<li><code>modelProvider: &quot;openai&quot;</code> 表示走 OpenAI 兼容协议，不代表只能用 OpenAI</li>
+<li>DeepSeek、通义、智谱等兼容接口，只需要换 <code>baseURL</code> 和模型名</li>
+<li>环境变量缺失时一次性列出所有缺失项，不要一个个报错</li>
+<li>错误翻译比原始报错更重要：401/403、404、429、5xx、DNS、超时分别提示</li>
+</ul>
+<p>常见错误：</p>
+<table>
+<thead>
+<tr>
+<th>现象</th>
+<th>可能原因</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>401 / 403</td>
+<td>key 错误、过期、没有该模型权限</td>
+</tr>
+<tr>
+<td>404</td>
+<td>模型名错误、baseURL 少了 <code>/v4</code> 之类的路径</td>
+</tr>
+<tr>
+<td>429</td>
+<td>限流或额度不足</td>
+</tr>
+<tr>
+<td>5xx</td>
+<td>服务端问题，可重试</td>
+</tr>
+<tr>
+<td>连接超时</td>
+<td>网络、代理、baseURL 不可达</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>3. 消息与流式输出</h2>
+<h3>3.1 invoke 与 stream</h3>
+<ul>
+<li><code>invoke</code>：等全部生成完，返回完整 <code>AIMessage</code></li>
+<li><code>stream</code>：一边生成一边返回 <code>AIMessageChunk</code></li>
+</ul>
+<pre><code class="language-ts">const stream = await model.stream(messages);
+
+for await (const chunk of stream) {
+  process.stdout.write(extractText(chunk));
+}
+</code></pre>
+<p><code>extractText</code> 要兼容两种 content：</p>
+<pre><code class="language-ts">function extractText(message: BaseMessage): string {
+  if (typeof message.content === &quot;string&quot;) return message.content;
+  return message.content
+    .filter((block) =&gt; block.type === &quot;text&quot;)
+    .map((block) =&gt; block.text)
+    .join(&quot;&quot;);
+}
+</code></pre>
+<h3>3.2 Agent 的两种 streamMode</h3>
+<pre><code class="language-ts">const stream = await agent.stream(
+  { messages: [new HumanMessage(&quot;现在几点？&quot;)] },
+  { streamMode: &quot;messages&quot; },
+);
+
+for await (const [message] of stream) {
+  // message 是消息分片，metadata 是附加信息
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>产出</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>&quot;messages&quot;</code></td>
+<td><code>[消息分片, metadata]</code></td>
+<td>逐字输出最终文本</td>
+</tr>
+<tr>
+<td><code>&quot;updates&quot;</code></td>
+<td><code>{ 节点名: 状态更新 }</code></td>
+<td>观察工具调用、节点执行顺序</td>
+</tr>
+</tbody></table>
+<p>注意：<code>&quot;messages&quot;</code> 流里也会出现工具消息和带 <code>tool_calls</code> 的 AI 分片，打印前要过滤。</p>
+<hr>
+<h2>4. 结构化输出</h2>
+<p>目标：让模型返回可被程序直接消费的对象，而不是一段需要正则解析的文本。</p>
+<pre><code class="language-ts">import { z } from &quot;zod&quot;;
+
+const IntentSchema = z.object({
+  intent: z.enum([&quot;weather&quot;, &quot;calculator&quot;, &quot;knowledge_search&quot;, &quot;chitchat&quot;]),
+  confidence: z.number().min(0).max(1),
+  reason: z.string(),
+});
+
+const runner = model.withStructuredOutput(IntentSchema, {
+  name: &quot;route_intent&quot;,
+});
+
+const result = await runner.invoke([
+  new SystemMessage(&quot;判断用户意图&quot;),
+  new HumanMessage(&quot;明天会下雨吗&quot;),
+]);
+</code></pre>
+<h3>4.1 关键点</h3>
+<ul>
+<li><code>withStructuredOutput</code> 返回的是 Runnable，用 <code>invoke</code> 执行</li>
+<li>schema 会被转成 JSON Schema 发给模型</li>
+<li>每个字段加 <code>.describe()</code>，字段名之外再给模型自然语言说明</li>
+<li>缺失字段用 <code>.nullable()</code>，不要用 <code>.optional()</code>：<ul>
+<li><code>.nullable()</code>：字段存在，值可以是 <code>null</code></li>
+<li><code>.optional()</code>：字段可以不存在</li>
+</ul>
+</li>
+<li>结构化输出不是 100% 可靠，失败要捕获、提示、最多重试一次</li>
+</ul>
+<h3>4.2 provider 兼容</h3>
+<p>有些 OpenAI 兼容服务不支持 <code>response_format: json_schema</code>，会返回 400。处理方式：</p>
+<pre><code class="language-ts">const runner = model.withStructuredOutput(schema, {
+  name: &quot;extract_meeting&quot;,
+  method: &quot;functionCalling&quot;,
+});
+</code></pre>
+<p>以当前版本的 <code>withStructuredOutput</code> 类型定义为准，不要凭记忆写参数。</p>
+<h3>4.3 Agent 的 responseFormat</h3>
+<pre><code class="language-ts">const agent = createAgent({
+  model,
+  tools,
+  systemPrompt,
+  responseFormat: z.object({
+    answer: z.string(),
+    usedTools: z.array(z.string()),
+    confidence: z.enum([&quot;low&quot;, &quot;medium&quot;, &quot;high&quot;]),
+  }),
+});
+
+const result = await agent.invoke({ messages: [new HumanMessage(&quot;...&quot;)] });
+console.log(result.structuredResponse);
+</code></pre>
+<p>注意：结构化结果是最终产物，不适合再要求逐字流式输出。</p>
+<hr>
+<h2>5. 工具与 Tool Calling</h2>
+<h3>5.1 定义工具</h3>
+<pre><code class="language-ts">import { tool } from &quot;@langchain/core/tools&quot;;
+import { z } from &quot;zod&quot;;
+
+const calculateTool = tool(
+  ({ a, b, op }) =&gt; {
+    if (op === &quot;/&quot; &amp;&amp; b === 0) return &quot;错误：除数不能为 0&quot;;
+    switch (op) {
+      case &quot;+&quot;: return String(a + b);
+      case &quot;-&quot;: return String(a - b);
+      case &quot;*&quot;: return String(a * b);
+      case &quot;/&quot;: return String(a / b);
+    }
+  },
+  {
+    name: &quot;calculate&quot;,
+    description: &quot;做四则运算。用户要求计算时调用。&quot;,
+    schema: z.object({
+      a: z.number(),
+      b: z.number(),
+      op: z.enum([&quot;+&quot;, &quot;-&quot;, &quot;*&quot;, &quot;/&quot;]),
+    }),
+  },
+);
+</code></pre>
+<p><strong><code>description</code> 决定“何时调用”，<code>schema</code> 决定“参数怎么填”</strong>。</p>
+<h3>5.2 手动循环（理解协议）</h3>
+<pre><code class="language-ts">const modelWithTools = model.bindTools(tools);
+const messages: BaseMessage[] = [
+  new SystemMessage(&quot;你可以使用工具&quot;),
+  new HumanMessage(&quot;现在几点？&quot;),
+];
+
+for (let round = 0; round &lt; 5; round++) {
+  const ai = await modelWithTools.invoke(messages);
+  messages.push(ai);
+
+  if (!ai.tool_calls?.length) break;
+
+  for (const call of ai.tool_calls) {
+    const selected = findTool(call.name);
+    const content = selected
+      ? await selected.invoke(call.args)
+      : `未知工具：${call.name}`;
+
+    messages.push(
+      new ToolMessage({
+        content: String(content),
+        tool_call_id: call.id ?? &quot;&quot;,
+      }),
+    );
+  }
+}
+</code></pre>
+<p>关键规则：</p>
+<ul>
+<li><code>bindTools</code> 只把工具定义发给模型，<strong>不会执行工具</strong></li>
+<li>模型返回的是 <code>tool_calls</code>，执行发生在本地</li>
+<li>每条 <code>ToolMessage</code> 的 <code>tool_call_id</code> 必须和对应的调用一致，否则模型无法关联</li>
+<li>工具报错也要回填，而不是让进程崩掉</li>
+<li>必须限制最大轮数，避免模型反复调用</li>
+</ul>
+<h3>5.3 工具设计原则</h3>
+<ul>
+<li>参数用 Zod 收窄，枚举、范围、必填/可选都写清</li>
+<li>返回值用字符串，方便直接放进 <code>ToolMessage</code></li>
+<li>不要用 <code>eval</code> / <code>new Function</code> 执行模型生成的代码</li>
+<li>工具内部的异常尽量转成可读错误字符串</li>
+<li>一个工具只做一件事，描述具体，不要“万能工具”</li>
+</ul>
+<hr>
+<h2>6. createAgent</h2>
+<pre><code class="language-ts">import { createAgent } from &quot;langchain&quot;;
+
+const agent = createAgent({
+  model,
+  tools,
+  systemPrompt: `你是中文助手。
+- 需要工具时先调用工具
+- 工具结果要转述成自然语言，不要原样贴 JSON
+- 不知道就明确说不知道`,
+});
+
+const result = await agent.invoke({
+  messages: [new HumanMessage(&quot;现在上海几点？再算 37 * 19&quot;)],
+});
+</code></pre>
+<h3>6.1 相比手动循环省了什么</h3>
+<ul>
+<li>自动 <code>bindTools</code></li>
+<li>自动执行工具</li>
+<li>自动生成 <code>ToolMessage</code> 并回填</li>
+<li>自动判断何时结束循环</li>
+</ul>
+<h3>6.2 systemPrompt 写法</h3>
+<p>好的 systemPrompt 不是“你是一个聪明的助手”，而是明确约束：</p>
+<ul>
+<li>回答语言</li>
+<li>什么时候必须用工具</li>
+<li>工具结果怎么转述</li>
+<li>没有依据时怎么回答</li>
+<li>引用格式</li>
+</ul>
+<h3>6.3 常用配置</h3>
+<table>
+<thead>
+<tr>
+<th>配置</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>model</code></td>
+<td>主模型</td>
+</tr>
+<tr>
+<td><code>tools</code></td>
+<td>可用工具</td>
+</tr>
+<tr>
+<td><code>systemPrompt</code></td>
+<td>行为约束</td>
+</tr>
+<tr>
+<td><code>responseFormat</code></td>
+<td>最终答复结构化</td>
+</tr>
+<tr>
+<td><code>middleware</code></td>
+<td>摘要、重试、审批、自定义工具处理</td>
+</tr>
+<tr>
+<td><code>checkpointer</code></td>
+<td>按 <code>thread_id</code> 保存状态</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>7. 会话记忆</h2>
+<pre><code class="language-ts">import { MemorySaver } from &quot;@langchain/langgraph&quot;;
+
+const checkpointer = new MemorySaver();
+
+const agent = createAgent({
+  model,
+  tools,
+  systemPrompt,
+  checkpointer,
+});
+
+const config = { configurable: { thread_id: &quot;user-a&quot; } };
+
+await agent.invoke(
+  { messages: [new HumanMessage(&quot;我叫小明&quot;)] },
+  config,
+);
+
+await agent.invoke(
+  { messages: [new HumanMessage(&quot;我叫什么？&quot;)] },
+  config,
+);
+</code></pre>
+<p>要点：</p>
+<ul>
+<li><code>thread_id</code> 是会话主键</li>
+<li>同一个 <code>thread_id</code> 共享历史，不同 <code>thread_id</code> 完全隔离</li>
+<li><code>MemorySaver</code> 只存在进程内存，重启即丢</li>
+<li>生产环境要换持久化 checkpointer</li>
+<li>checkpointer 保存的是完整消息历史，不是“模型学会了”</li>
+</ul>
+<p>查看某个线程的状态：</p>
+<pre><code class="language-ts">const snapshot = await agent.graph.getState({
+  configurable: { thread_id: &quot;user-a&quot; },
+});
+
+console.log(snapshot.values.messages);
+</code></pre>
+<hr>
+<h2>8. RAG</h2>
+<h3>8.1 完整流程</h3>
+<pre><code class="language-text">文档
+ → 加载成 Document（带 metadata）
+ → 切分成 chunk
+ → embedding 成向量
+ → 写入向量库
+ → 用户提问
+ → 问题向量化
+ → 相似度检索 Top-K
+ → 把 chunk 拼进提示词
+ → 模型生成回答
+ → 标注来源
+</code></pre>
+<h3>8.2 加载与切分</h3>
+<pre><code class="language-ts">import { RecursiveCharacterTextSplitter } from &quot;@langchain/textsplitters&quot;;
+
+const splitter = new RecursiveCharacterTextSplitter({
+  chunkSize: 400,
+  chunkOverlap: 80,
+});
+
+const chunks = await splitter.splitDocuments(docs);
+</code></pre>
+<ul>
+<li><code>chunkSize</code> 太大：检索不精准，提示词变长</li>
+<li><code>chunkSize</code> 太小：语义不完整，回答缺上下文</li>
+<li><code>chunkOverlap</code> 用来避免关键句被切断</li>
+<li>每个 chunk 都要保留 <code>source</code>、<code>chunkIndex</code> 等 metadata，否则无法引用</li>
+</ul>
+<h3>8.3 向量库</h3>
+<pre><code class="language-ts">import { MemoryVectorStore } from &quot;@langchain/classic/vectorstores/memory&quot;;
+
+const vectorStore = await MemoryVectorStore.fromDocuments(
+  chunks,
+  embeddings,
+);
+
+const results = await vectorStore.similaritySearchWithScore(&quot;RAG 流程&quot;, 4);
+</code></pre>
+<p><code>results</code> 是 <code>[Document, score][]</code>。分数用于判断相关性，不要只看前几条。</p>
+<h3>8.4 检索工具化</h3>
+<pre><code class="language-ts">const searchTool = tool(
+  async ({ query }) =&gt; {
+    const results = await searchDocs(query, 4);
+
+    if (results.length === 0) {
+      return &quot;知识库中没有找到相关内容。&quot;;
+    }
+
+    return results
+      .map(
+        (item, index) =&gt;
+          `[${index + 1}] 来源: ${item.source}#${item.chunkIndex}\n${item.content}`,
+      )
+      .join(&quot;\n\n&quot;);
+  },
+  {
+    name: &quot;search_knowledge_base&quot;,
+    description: &quot;在本地知识库中检索与问题相关的片段。&quot;,
+    schema: z.object({ query: z.string() }),
+  },
+);
+</code></pre>
+<p>Agent 的 systemPrompt 要配合：</p>
+<pre><code class="language-text">只依据检索结果回答。
+每个结论后标注 [来源: 文件名#chunkIndex]。
+检索结果不足时回答“根据现有知识库无法回答”，不要补充常识。
+</code></pre>
+<h3>8.5 常见坑</h3>
+<ul>
+<li>忘记把 metadata 带到 chunk，回答无法引用</li>
+<li>每次请求都重新 embed，浪费时间和额度</li>
+<li>检索不到还让模型“自由发挥”，导致编造</li>
+<li>把所有 chunk 都塞进上下文，超出 token 限制</li>
+<li>embedding 模型和向量库维度不一致</li>
+<li>换了文档但没重建索引</li>
+</ul>
+<hr>
+<h2>9. Middleware</h2>
+<p>Middleware 是 Agent 生命周期上的钩子，不是新的 Agent。</p>
+<p>常见能力：</p>
+<table>
+<thead>
+<tr>
+<th>Middleware</th>
+<th>作用</th>
+<th>执行阶段</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>summarizationMiddleware</code></td>
+<td>历史太长时自动摘要</td>
+<td>beforeModel</td>
+</tr>
+<tr>
+<td><code>toolRetryMiddleware</code></td>
+<td>工具失败自动重试</td>
+<td>wrapToolCall</td>
+</tr>
+<tr>
+<td><code>humanInTheLoopMiddleware</code></td>
+<td>工具执行前暂停审批</td>
+<td>afterModel</td>
+</tr>
+<tr>
+<td>自定义 <code>wrapToolCall</code></td>
+<td>工具异常转成可读结果</td>
+<td>wrapToolCall</td>
+</tr>
+</tbody></table>
+<h3>9.1 摘要</h3>
+<pre><code class="language-ts">summarizationMiddleware({
+  model,
+  trigger: { messages: 8 },
+  keep: { messages: 4 },
+})
+</code></pre>
+<ul>
+<li><code>trigger</code> 是触发阈值</li>
+<li><code>keep</code> 是压缩后保留的最近原文条数</li>
+<li>摘要本身也是一次模型调用</li>
+<li>需要 checkpointer 才能观察多轮状态</li>
+</ul>
+<h3>9.2 重试</h3>
+<pre><code class="language-ts">toolRetryMiddleware({
+  maxRetries: 2,
+  initialDelayMs: 300,
+  backoffFactor: 1,
+  tools: [&quot;flaky_search&quot;],
+})
+</code></pre>
+<ul>
+<li><code>maxRetries: 2</code> 表示额外重试 2 次，总尝试 3 次</li>
+<li><code>tools</code> 白名单避免所有工具都被重试</li>
+<li>重试只对“可恢复错误”有意义，业务错误不该重试</li>
+</ul>
+<h3>9.3 Human-in-the-loop</h3>
+<pre><code class="language-ts">humanInTheLoopMiddleware({
+  interruptOn: {
+    delete_note: {
+      allowedDecisions: [&quot;approve&quot;, &quot;reject&quot;],
+      description: &quot;删除笔记需要人工确认&quot;,
+    },
+  },
+})
+</code></pre>
+<p>第一次 <code>invoke</code> 不会执行工具，而是返回中断：</p>
+<pre><code class="language-ts">const result = await agent.invoke(
+  { messages: [new HumanMessage(&quot;删除 note-1&quot;)] },
+  { configurable: { thread_id: &quot;hitl-1&quot; } },
+);
+
+const interrupt = result.__interrupt__?.[0];
+</code></pre>
+<p>恢复必须用 <code>Command</code>，并且用<strong>同一个 thread</strong>：</p>
+<pre><code class="language-ts">import { Command } from &quot;@langchain/langgraph&quot;;
+
+await agent.invoke(
+  new Command({
+    resume: { decisions: [{ type: &quot;approve&quot; }] },
+  }),
+  { configurable: { thread_id: &quot;hitl-1&quot; } },
+);
+</code></pre>
+<p>拒绝：</p>
+<pre><code class="language-ts">new Command({
+  resume: {
+    decisions: [{ type: &quot;reject&quot;, message: &quot;演示模式禁止删除&quot; }],
+  },
+})
+</code></pre>
+<p>关键：</p>
+<ul>
+<li>中断后不要用同一个 thread 发新消息，否则是从断点继续</li>
+<li>reject 不是静默取消，拒绝原因会变成 ToolMessage 回填给模型</li>
+<li>HITL 依赖 checkpointer</li>
+</ul>
+<h3>9.4 自定义工具错误处理</h3>
+<pre><code class="language-ts">const toolErrorMiddleware = createMiddleware({
+  name: &quot;tool-error-handler&quot;,
+  wrapToolCall: async (request, handler) =&gt; {
+    try {
+      return await handler(request);
+    } catch (error) {
+      return new ToolMessage({
+        content: `工具 ${request.tool.name} 执行失败：${String(error)}`,
+        tool_call_id: request.toolCall.id ?? &quot;&quot;,
+      });
+    }
+  },
+});
+</code></pre>
+<h3>9.5 middleware 顺序很重要</h3>
+<p>LangChain 从数组第一个开始，把每个 <code>wrapToolCall</code> 依次包在外层：</p>
+<pre><code class="language-text">第一个 = 最外层
+</code></pre>
+<p>正确顺序：</p>
+<pre><code class="language-ts">[
+  toolErrorMiddleware,      // 最外层：最终异常兜底
+  toolRetryMiddleware(...)  // 内层：捕获真实异常并重试
+]
+</code></pre>
+<p>调用链：</p>
+<pre><code class="language-text">toolError( toolRetry( baseHandler ) )
+</code></pre>
+<p>如果反过来：</p>
+<pre><code class="language-text">toolRetry( toolError( baseHandler ) )
+</code></pre>
+<p>工具抛错时，内层 <code>toolError</code> 先把它转成成功的 <code>ToolMessage</code>，<code>toolRetry</code> 看到“调用成功”，于是<strong>不会重试</strong>。</p>
+<hr>
+<h2>10. 接入前端</h2>
+<h3>10.1 Route Handler</h3>
+<pre><code class="language-ts">export const runtime = &quot;nodejs&quot;;
+
+export async function POST(req: Request) {
+  const { threadId, message } = await req.json();
+
+  const stream = await agent.stream(
+    { messages: [new HumanMessage(message)] },
+    {
+      configurable: { thread_id: threadId },
+      streamMode: &quot;messages&quot;,
+    },
+  );
+
+  const encoder = new TextEncoder();
+
+  return new Response(
+    new ReadableStream({
+      async start(controller) {
+        for await (const [chunk] of stream) {
+          const text = extractText(chunk);
+          if (text) controller.enqueue(encoder.encode(text));
+        }
+        controller.close();
+      },
+    }),
+    {
+      headers: {
+        &quot;Content-Type&quot;: &quot;text/plain; charset=utf-8&quot;,
+        &quot;Cache-Control&quot;: &quot;no-cache&quot;,
+      },
+    },
+  );
+}
+</code></pre>
+<h3>10.2 前端读取流</h3>
+<pre><code class="language-ts">const response = await fetch(&quot;/api/chat&quot;, {
+  method: &quot;POST&quot;,
+  headers: { &quot;Content-Type&quot;: &quot;application/json&quot; },
+  body: JSON.stringify({ threadId, message }),
+});
+
+const reader = response.body!.getReader();
+const decoder = new TextDecoder();
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  append(decoder.decode(value, { stream: true }));
+}
+</code></pre>
+<h3>10.3 要点</h3>
+<ul>
+<li><code>threadId</code> 前端生成，随请求带上</li>
+<li>“新会话”就是换一个 <code>threadId</code></li>
+<li>Agent 要懒加载，避免 <code>next build</code> 阶段因缺少 env 失败</li>
+<li>服务端异常要写进流里，否则页面一直转圈</li>
+<li>客户端断开后停止读取，避免继续消耗模型调用</li>
+</ul>
+<hr>
+<h2>11. LangSmith 与 StateGraph</h2>
+<h3>11.1 LangSmith</h3>
+<pre><code class="language-bash">LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=...
+LANGSMITH_PROJECT=langchain-learning
+</code></pre>
+<ul>
+<li>配好后 LangChain 自动上报，不需要手动创建 tracer</li>
+<li>在 LangSmith 的 Projects 里能看到：<ul>
+<li>模型调用</li>
+<li>工具调用</li>
+<li>输入输出</li>
+<li>耗时和 token</li>
+</ul>
+</li>
+<li>没有 key 时项目要能正常运行，打印“跳过追踪”即可</li>
+</ul>
+<h3>11.2 StateGraph</h3>
+<pre><code class="language-ts">import { END, START, StateGraph } from &quot;@langchain/langgraph&quot;;
+
+const graph = new StateGraph(GraphState)
+  .addNode(&quot;classifyNode&quot;, classifyNode)
+  .addNode(&quot;answerNode&quot;, answerNode)
+  .addNode(&quot;reviewNode&quot;, reviewNode)
+  .addEdge(START, &quot;classifyNode&quot;)
+  .addEdge(&quot;classifyNode&quot;, &quot;answerNode&quot;)
+  .addEdge(&quot;answerNode&quot;, &quot;reviewNode&quot;)
+  .addEdge(&quot;reviewNode&quot;, END)
+  .compile();
+
+const result = await graph.invoke({ question: &quot;现在几点？&quot; });
+</code></pre>
+<p>要点：</p>
+<ul>
+<li>节点函数接收完整 State，返回<strong>部分更新</strong></li>
+<li>普通字段是覆盖，<code>ReducedValue</code> 可以累积</li>
+<li><code>START</code> / <code>END</code> 是图的入口和出口哨兵</li>
+<li><code>compile()</code> 才会校验节点和边是否合法</li>
+<li>节点名不能和状态字段同名，否则会冲突</li>
+<li><code>createAgent</code> 内部就是一张 LangGraph 图，自己写图是为了更细的控制</li>
+</ul>
+<p><code>ReducedValue</code> 示例：</p>
+<pre><code class="language-ts">const GraphState = new StateSchema({
+  question: z.string(),
+  category: z.string().default(&quot;unknown&quot;),
+  answer: z.string().default(&quot;&quot;),
+  steps: new ReducedValue(
+    z.array(z.string()).default(() =&gt; []),
+    {
+      inputSchema: z.string(),
+      reducer: (current, next) =&gt; [...current, next],
+    },
+  ),
+});
+</code></pre>
+<p>节点返回 <code>{ steps: &quot;classify&quot; }</code>，最终 <code>steps</code> 会变成 <code>[&quot;classify&quot;, &quot;answer&quot;, &quot;review&quot;]</code>。</p>
+<hr>
+<h2>12. API 速查</h2>
+<table>
+<thead>
+<tr>
+<th>API</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>initChatModel</code></td>
+<td>初始化 OpenAI 兼容模型</td>
+</tr>
+<tr>
+<td><code>model.invoke</code> / <code>model.stream</code></td>
+<td>一次性调用 / 流式调用</td>
+</tr>
+<tr>
+<td><code>withStructuredOutput</code></td>
+<td>让模型返回 Zod 对象</td>
+</tr>
+<tr>
+<td><code>tool()</code></td>
+<td>定义工具</td>
+</tr>
+<tr>
+<td><code>model.bindTools()</code></td>
+<td>给模型绑定工具定义</td>
+</tr>
+<tr>
+<td><code>createAgent</code></td>
+<td>创建能自动调用工具的 Agent</td>
+</tr>
+<tr>
+<td><code>MemorySaver</code></td>
+<td>内存版 checkpointer</td>
+</tr>
+<tr>
+<td><code>thread_id</code></td>
+<td>会话主键</td>
+</tr>
+<tr>
+<td><code>RecursiveCharacterTextSplitter</code></td>
+<td>文档切分</td>
+</tr>
+<tr>
+<td><code>OpenAIEmbeddings</code></td>
+<td>文本向量化</td>
+</tr>
+<tr>
+<td><code>MemoryVectorStore</code></td>
+<td>内存向量库</td>
+</tr>
+<tr>
+<td><code>similaritySearchWithScore</code></td>
+<td>相似度检索并返回分数</td>
+</tr>
+<tr>
+<td><code>summarizationMiddleware</code></td>
+<td>历史摘要</td>
+</tr>
+<tr>
+<td><code>toolRetryMiddleware</code></td>
+<td>工具重试</td>
+</tr>
+<tr>
+<td><code>humanInTheLoopMiddleware</code></td>
+<td>工具执行前审批</td>
+</tr>
+<tr>
+<td><code>createMiddleware</code></td>
+<td>自定义 middleware</td>
+</tr>
+<tr>
+<td><code>Command</code></td>
+<td>HITL 中断后恢复</td>
+</tr>
+<tr>
+<td><code>agent.graph.getState</code></td>
+<td>读取线程状态</td>
+</tr>
+<tr>
+<td><code>StateGraph</code></td>
+<td>自定义状态图</td>
+</tr>
+<tr>
+<td><code>StateSchema</code> / <code>ReducedValue</code></td>
+<td>图状态定义与累积字段</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>13. 常见坑清单</h2>
+<ol>
+<li>以为模型会自己记住上下文，忘记每次都发完整 <code>messages</code></li>
+<li>把 <code>AIMessageChunk</code> 直接 push 进历史，导致下一轮上下文损坏</li>
+<li><code>ToolMessage</code> 的 <code>tool_call_id</code> 和 <code>AIMessage.tool_calls</code> 对不上</li>
+<li>工具报错直接抛出，整个 Agent 崩掉</li>
+<li><code>withStructuredOutput</code> 遇到不支持 JSON Schema 的 provider 返回 400</li>
+<li>用 <code>.optional()</code> 做“字段缺失”，结果模型直接不返回该字段</li>
+<li>文档切得太碎，检索到的 chunk 没有完整语义</li>
+<li>换文档后忘记重建向量索引</li>
+<li>检索不到还让模型自由回答，造成编造</li>
+<li>middleware 顺序写反，重试被错误处理“吃掉”</li>
+<li>HITL 中断后用新消息继续，而不是 <code>Command({ resume })</code></li>
+<li><code>streamMode</code> 用混，把 <code>updates</code> 当成文本分片</li>
+<li><code>MemorySaver</code> 以为能持久化，重启后记忆全丢</li>
+<li>Next.js 在模块顶层创建 Agent，<code>next build</code> 时因缺少 env 失败</li>
+</ol>
+<hr>
+<h2>14. 自测题</h2>
+<ol>
+<li>为什么模型无状态，多轮对话为什么要把历史全部发回去？</li>
+<li><code>invoke</code> 和 <code>stream</code> 返回的对象有什么本质区别？</li>
+<li><code>withStructuredOutput</code> 返回的是模型还是 Runnable？</li>
+<li><code>.nullable()</code> 和 <code>.optional()</code> 在结构化输出里有什么区别？</li>
+<li><code>bindTools</code> 会自动执行工具吗？</li>
+<li><code>ToolMessage</code> 为什么必须带 <code>tool_call_id</code>？</li>
+<li><code>createAgent</code> 比手动工具循环多了哪些能力？</li>
+<li><code>thread_id</code> 在记忆里起什么作用？</li>
+<li><code>MemorySaver</code> 重启后为什么没有记忆？</li>
+<li>RAG 的六个步骤分别是什么？</li>
+<li>为什么检索工具返回内容要带 <code>source</code> 和 <code>chunkIndex</code>？</li>
+<li><code>toolRetryMiddleware</code> 的 <code>maxRetries: 2</code> 总尝试几次？</li>
+<li>middleware 数组第一个是最外层还是最内层？</li>
+<li>HITL 中断后为什么不能直接发新消息？</li>
+<li><code>StateGraph</code> 节点返回的是完整 State 还是部分更新？</li>
+<li><code>ReducedValue</code> 解决什么问题？</li>
+</ol>
+<hr>
+<h2>15. 两周后应该能做到</h2>
+<ul>
+<li>给 Agent 加一个新工具，并写清 <code>description</code> 和 schema</li>
+<li>把一套新文档接进 RAG，调整切分参数并验证检索效果</li>
+<li>给聊天页加会话列表，用不同 <code>threadId</code> 隔离</li>
+<li>用 middleware 处理工具失败、长对话和危险操作</li>
+<li>用 LangSmith 定位一次工具调用失败</li>
+<li>用 <code>StateGraph</code> 写一个固定流程，而不是所有事情都交给 Agent</li>
+</ul>
+<h2>16. 暂不深入</h2>
+<ul>
+<li>多 Agent 协作、子图、 supervisor 模式</li>
+<li>持久化 checkpointer（SQLite / Postgres）</li>
+<li>生产级向量数据库、混合检索、重排</li>
+<li>鉴权、配额、限流、完整的前端取消与重试</li>
+<li>部署与可观测性平台</li>
+</ul>
+<p>这些等有真实需求再补。</p>
+<hr>
+<h2>17. 自测题答案</h2>
+<h3>1. 为什么模型无状态，多轮对话为什么要把历史全部发回去？</h3>
+<p>模型的一次调用本质是“输入消息数组 → 输出一条消息”，服务端不会自动保存你的上一轮上下文。所谓多轮对话，是调用方每轮都把完整历史重新发过去，模型才能“看到”前文。</p>
+<p>代价是 token 会随轮数增长，所以长对话需要摘要或裁剪；好处是历史完全由你控制，可以编辑、分支、重试。</p>
+<h3>2. <code>invoke</code> 和 <code>stream</code> 返回的对象有什么本质区别？</h3>
+<ul>
+<li><code>invoke</code>：等模型全部生成完，返回一条完整的 <code>AIMessage</code></li>
+<li><code>stream</code>：返回一个异步可迭代对象，逐段产出 <code>AIMessageChunk</code></li>
+</ul>
+<p><code>stream</code> 的每个 chunk 只是增量，文本和 <code>tool_calls</code> 都可能被拆开，必须自行拼接；它降低的是首字延迟，不一定降低总耗时。</p>
+<h3>3. <code>withStructuredOutput</code> 返回的是模型还是 Runnable？</h3>
+<p>返回的是 Runnable。它把“模型调用 + schema 转 JSON Schema + 输出解析 + Zod 校验”打包成一条可执行链，调用 <code>invoke</code> 才真正发请求。</p>
+<p>它不是聊天模型实例，通常不能再对它 <code>bindTools</code>。</p>
+<h3>4. <code>.nullable()</code> 和 <code>.optional()</code> 在结构化输出里有什么区别？</h3>
+<ul>
+<li><code>.nullable()</code>：字段必须存在，值可以是 <code>null</code></li>
+<li><code>.optional()</code>：字段可以整个不存在，读出来是 <code>undefined</code></li>
+</ul>
+<p>做信息抽取时优先用 <code>.nullable()</code>，强制模型明确回答“没有这个信息”，下游类型更稳定。真正允许省略字段时才用 <code>.optional()</code>；两者都要允许可以用 <code>.nullish()</code>。</p>
+<h3>5. <code>bindTools</code> 会自动执行工具吗？</h3>
+<p>不会。<code>bindTools</code> 只是把工具的名称、描述、参数 schema 附加到模型请求里。模型返回 <code>tool_calls</code> 后，执行工具、生成 <code>ToolMessage</code>、再次调用模型，仍然要由本地代码完成。</p>
+<p><code>createAgent</code> 才把这些步骤封装成自动循环。</p>
+<h3>6. <code>ToolMessage</code> 为什么必须带 <code>tool_call_id</code>？</h3>
+<p><code>tool_call_id</code> 把“工具结果”精确关联到“模型发起的某一次调用”。模型一次可能并行发起多个工具调用，没有这个 ID，就无法判断哪条结果属于哪次调用，轻则模型误读，重则 API 直接报消息序列错误。</p>
+<h3>7. <code>createAgent</code> 比手动工具循环多了哪些能力？</h3>
+<ul>
+<li>自动绑定工具</li>
+<li>自动执行工具并生成 <code>ToolMessage</code></li>
+<li>自动维护“模型 → 工具 → 模型”的循环和终止条件</li>
+<li>自动管理消息状态</li>
+<li>支持 <code>stream</code>、<code>responseFormat</code></li>
+<li>支持 middleware 和 checkpointer</li>
+<li>支持 HITL 中断与恢复</li>
+</ul>
+<p>手动循环只实现协议本身，这些都要自己写。</p>
+<h3>8. <code>thread_id</code> 在记忆里起什么作用？</h3>
+<p><code>thread_id</code> 是 checkpointer 的会话主键。同一个 ID 会加载同一份历史状态，不同 ID 完全隔离。</p>
+<p>它也让 HITL 能在中断后从同一个线程的断点恢复，而不是重新开始。</p>
+<h3>9. <code>MemorySaver</code> 重启后为什么没有记忆？</h3>
+<p><code>MemorySaver</code> 把 checkpoint 存在进程内存里，进程退出就清空；多进程之间也不共享。</p>
+<p>它只适合开发和演示。生产环境要换成 SQLite、Postgres、Redis 等持久化 checkpointer。</p>
+<h3>10. RAG 的六个步骤分别是什么？</h3>
+<ol>
+<li>加载文档，转成带 metadata 的 <code>Document</code></li>
+<li>切分成 chunk</li>
+<li>对 chunk 做 embedding</li>
+<li>写入向量库</li>
+<li>把用户问题向量化，做相似度检索，取 Top-K</li>
+<li>把检索到的片段拼进提示词，交给模型生成回答，并标注来源</li>
+</ol>
+<h3>11. 为什么检索工具返回内容要带 <code>source</code> 和 <code>chunkIndex</code>？</h3>
+<ul>
+<li><code>source</code> 回答“来自哪篇文档”</li>
+<li><code>chunkIndex</code> 回答“来自这篇文档的哪一段”</li>
+</ul>
+<p>有了它们才能做引用、定位错误、排查检索质量、去重，以及在文档更新后找到旧索引。没有这两个字段，回答就无法验证。</p>
+<h3>12. <code>toolRetryMiddleware</code> 的 <code>maxRetries: 2</code> 总尝试几次？</h3>
+<p>总共 3 次：首次调用 1 次 + 额外重试 2 次。</p>
+<p>如果 3 次都失败，异常会继续往外层 middleware 抛。</p>
+<h3>13. middleware 数组第一个是最外层还是最内层？</h3>
+<p>第一个是最外层。LangChain 按数组顺序包裹：</p>
+<pre><code class="language-text">[A, B] → A( B( baseHandler ) )
+</code></pre>
+<p>所以正确顺序是：</p>
+<pre><code class="language-text">[toolErrorMiddleware, toolRetryMiddleware]
+</code></pre>
+<p><code>toolRetry</code> 在内层才能捕获到原始异常并重试；如果 <code>toolError</code> 在内层，它会把异常转成成功的 <code>ToolMessage</code>，<code>toolRetry</code> 看到“调用成功”就不会重试。</p>
+<h3>14. HITL 中断后为什么不能直接发新消息？</h3>
+<p>中断时整个图停在工具执行前的断点，线程状态是“暂停”。这时在同一个 <code>thread_id</code> 上再发一条 <code>HumanMessage</code>，会被当成从断点继续的输入，而不是开始新一轮对话，流程和状态都会错乱。</p>
+<p>正确做法是用 <code>Command({ resume })</code> 在同一个 <code>thread_id</code> 上提交审批决定；想重新开始就换一个新的 <code>thread_id</code>。</p>
+<h3>15. <code>StateGraph</code> 节点返回的是完整 State 还是部分更新？</h3>
+<p>返回部分更新。节点函数接收完整 State，但只返回需要修改的字段，LangGraph 再按字段的 channel / reducer 合并。</p>
+<p>返回完整 State 虽然能跑，但容易把其他节点刚写入的字段覆盖掉，不推荐。</p>
+<h3>16. <code>ReducedValue</code> 解决什么问题？</h3>
+<p>它解决“同一个字段被多个节点更新时如何合并”的问题。</p>
+<p>默认行为是后写覆盖前写；<code>ReducedValue</code> 允许自定义 reducer，例如把每次的字符串追加成数组：</p>
+<pre><code class="language-text">classify 返回 &quot;classify&quot;
+answer   返回 &quot;answer&quot;
+review   返回 &quot;review&quot;
+最终 steps = [&quot;classify&quot;, &quot;answer&quot;, &quot;review&quot;]
+</code></pre>
+<p>适合累积日志、步骤、计数器、候选列表等场景。</p>
+
+</body>
+</html>

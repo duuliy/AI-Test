@@ -1,0 +1,188 @@
+/* 极简样式，不引 UI 框架 */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei",
+    sans-serif;
+  background: #f5f5f7;
+  color: #1d1d1f;
+}
+
+/* 三段式布局：头部 / 消息区（自适应剩余高度）/ 输入区 */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 16px;
+  gap: 12px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.thread {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #86868b;
+  word-break: break-all;
+}
+
+.ghost {
+  padding: 8px 14px;
+  border: 1px solid #c7c7cc;
+  border-radius: 8px;
+  background: #fff;
+  color: #1d1d1f;
+  cursor: pointer;
+}
+
+.ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: #fff;
+  border-radius: 12px;
+  border: 1px solid #e5e5ea;
+}
+
+.empty {
+  margin: auto;
+  color: #86868b;
+  font-size: 14px;
+  text-align: center;
+  line-height: 1.8;
+}
+
+/* 用户靠右，助手靠左 */
+.row {
+  display: flex;
+}
+
+.row.user {
+  justify-content: flex-end;
+}
+
+.row.assistant {
+  justify-content: flex-start;
+}
+
+.bubble {
+  max-width: 80%;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: #f2f2f7;
+}
+
+.row.user .bubble {
+  background: #0071e3;
+  color: #fff;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.role {
+  display: block;
+  font-size: 12px;
+  opacity: 0.65;
+}
+
+/* 路由标签：知识库 / 时间 / 通用 */
+.badge {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #e5e5ea;
+  color: #4a4a4f;
+}
+
+.badge.knowledge {
+  background: #e3f0ff;
+  color: #005bb5;
+}
+
+.badge.time {
+  background: #e8f7ee;
+  color: #1a7f45;
+}
+
+.badge.general {
+  background: #f0f0f2;
+  color: #5a5a5f;
+}
+
+/* pre-wrap 保留换行；break-word 防止长英文撑破气泡 */
+.content {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+}
+
+.composer input {
+  flex: 1;
+  padding: 12px 14px;
+  font-size: 15px;
+  border: 1px solid #d1d1d6;
+  border-radius: 10px;
+  outline: none;
+  background: #fff;
+}
+
+.composer input:focus {
+  border-color: #0071e3;
+}
+
+.composer button {
+  padding: 12px 20px;
+  font-size: 15px;
+  border: none;
+  border-radius: 10px;
+  background: #0071e3;
+  color: #fff;
+  cursor: pointer;
+}
+
+.composer button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

@@ -1,0 +1,25 @@
+{
+  "name": "langgraph-research-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "demo": "tsx src/main.ts --thread=demo",
+    "demo:approve": "tsx src/main.ts --thread=demo --resume=approve",
+    "demo:reject": "tsx src/main.ts --thread=demo --resume=reject --feedback=\"补充一个具体例子\""
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3.80",
+    "@langchain/langgraph": "^0.2.74",
+    "@langchain/langgraph-checkpoint-sqlite": "^0.1.5",
+    "@langchain/openai": "^0.4.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
